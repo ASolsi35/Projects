@@ -1,0 +1,312 @@
+---
+title: 'Case Study 4: Web Scraping'
+author: "Kelly Carter, Swee K Chew, Volodymyr Orlov, Anjli Solsi"
+date: "1/25/2020"
+output:
+  html_document: default
+  word_document: default
+fig_caption: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+This case study utilizes data from the race results of the annually held Cherry Blossom Ten-Mile Run in Washington D.C. This analysis focuses on question 11, normalizing each male runner’s time by the fastest time for the runner of the same age. This is accomplished by finding the fastest runner for each year of age from 20 to 80 using the tapply() function. The times are smoothed using the loess() function, and the smoothed times are found using predict(). Using the smoothed times, normalization is applied to each run time. Then, various plots are used to compare the distribution of the age-normalized times for the runners in 1999 and 2012. The same process is then repeated for the women. In the end, there are comparisons between the women in 1999 and 2012 as well as the men in 1999 and 2012.
+
+## Background
+The Cherry Blossom Ten-Mile Run has increasingly grown in popularity, attracting tens of thousands of runners aged 9 to 89. The race is held in April, when the cherry trees blossom, having a lottery system which limits the number of runners. The annual results of all years from 1999 to 2012 are posted online, and the data is said to aid in establishing relationships between age and performance. This data includes the runners’ age, name, hometown, and run time all broken down by year.
+
+This case study begins with scraping the data from the web into R. The format of the data varies from year to year. The results are then formatted/cleaned in a way that can be analyzed in R to account for the various discrepancies and mistakes in the data. The authors started with locating each column of data and parsing each record. Header and footer information was ignored and blank information was removed. The times over the years were documented differently, and as the total run time was the focus, that column for each year was identified and organized. Run times were examined for outliers and determination was made as to the plausibility of them. Variables previously noted as NA were also dealt with and either removed or assigned the appropriate value. 
+
+## Methods
+
+We used the starter code provided by Professor Slater to scrape the data from the website for men and save it as an RData object. We then used the same set of code, replaced the html links for women and removed the following chunk of code since 2009 data for women was not saved under the node "//div[@class='Section1']" as in men 2009 data. A separate RData object is created for women data.
+
+    `else if (year == 2009 & sex == "male") {
+      # Get preformatted text from <div class="Section1"> element
+      # Each line of results is in a <pre> element
+      div1 = getNodeSet(doc, "//div[@class='Section1']")
+      pres = getNodeSet(div1[[1]], "//pre")
+      els = sapply(pres, xmlValue)
+    }`
+
+```{r}
+#load the r datasets
+load("cbMen.rda")
+head(cbMen)
+dim(cbMen)
+load("cbWomen.rda")
+head(cbWomen)
+dim(cbWomen)
+```
+
+### Analysis for Male Runners
+
+The summary statistics below show that the minimum age is 0 and there are 21 records with missing age value. In addition, the minimum run time is 1.5. Since it is a 10-mile race, it is not possible for someone to finish the race in just over a minute. Upon further investigation, the record comes from 2001 data and when we check the source data, it seems like only the first three digits of the net time was recorded for the runner name, Peter HUI, the remaining information is missing. Since it seems to be an error, we will remove that single record from the dataset.
+
+The new summary statistics now show the minimum run time to be over 45 minutes, which sounds reasonable. 
+
+```{r}
+summary(cbMen)
+cbMen[cbMen$runTime<=1.5, ]
+#drop Peter HUI with 1.5 runTime (2001)
+cbMen <- cbMen[cbMen$runTime>1.5, ]
+summary(cbMen)
+```
+
+Here, we try to find the fastest runner's run time for each year of age from 20 to 80. We then plot the fastest run time vs age and find the appropriate hyperparameters for smoothing the times by using loess curve fitting (Figure 1). For this data, the span value of 0.25 seems to be appropriate.
+
+```{r, fig.cap = "Figure 1: The purple line shows the fastest run time for each year of age from 20 to 80 for men. The red line indicates the loess smoothed times using span of 0.25."}
+#to plot age vs run time, and pick the span value
+fastestRunTime_Men = with(cbMen[cbMen$age >= 20 & cbMen$age <=80, ], tapply(runTime, list(age), FUN = function(x) min(x)))
+fastestRunTime_Men = data.frame(fastestRunTime_Men)
+age=20:80
+fastestRunTime_Men = cbind(age,fastestRunTime_Men)
+names(fastestRunTime_Men) <- c("age","runTime")
+#Smooth using LOESS
+loessResults <- loess(runTime ~ age, data=fastestRunTime_Men, span=0.25, degree=2)
+loessSmoothed <- predict(loessResults)
+loessSmoothed
+   
+plot(runTime ~ age, data = fastestRunTime_Men,
+     xlab = "Age",
+     ylab = "Fastest Run Time",
+     col = "purple", 
+     lwd = 2,
+     ylim = c(0,100),
+     type= "l",
+     main = "Fastest Run Time by Age for Men")
+   
+lines(loessSmoothed, x=fastestRunTime_Men$age, col="red", type='l')
+   
+```
+
+<br>
+We then create a function to normalize each male runner's time by the calculated smoothed time of the same age. We add two new columns to the men dataset, *minRunTime* and *normalizedRunTime*.
+To normalize run time we use this simple formula: 
+
+\begin{equation}
+\tag{1}
+newRunTime = \frac{runTime}{bestRunTime}
+\end{equation}
+
+where $newRunTime$, $runTime$, $bestRunTime$ are normalized, original and fastest runtime for a given age respectively. 
+
+```{r}
+#Normalization (Men)
+normalizeRunTime <- function(df) {
+   #calculate the fastest time for each age 20-80
+   fastestRunTime = with(df[df$age >= 20 & df$age <=80, ], tapply(runTime, list(age), FUN = function(x) min(x)))
+   
+   #Smooth using LOESS
+   time <- unname(fastestRunTime)
+   age <- as.integer(names(fastestRunTime))
+   loessResults <- loess(time ~ age, span=0.25, degree=2)
+   loessSmoothed <- predict(loessResults)
+   loessSmoothed
+   
+   #Normalize runtime
+   resultDf = data.frame(age=as.double(names(fastestRunTime)), minRunTime=loessSmoothed, row.names=NULL)
+   resultDf = merge(df, resultDf, by="age")
+   resultDf$normalizedRunTime <- resultDf$runTime / resultDf$minRunTime
+   
+   return(resultDf)
+}
+cbMen <- normalizeRunTime(cbMen)
+summary(cbMen)
+```
+
+In order to compare the distribution of the age-normalized times for the male runners in 1999 and 2012, we generate summary statistics, density plots, and quantile–quantile plots. 
+
+**Summary Statistics**
+
+```{r}
+summary(cbMen[cbMen$year == 1999, ]$normalizedRunTime)
+summary(cbMen[cbMen$year == 2012, ]$normalizedRunTime)
+```
+
+The summary statistics for 1999 and 2012 indicate that the normalized run times for 2012 have a slightly larger spread/range than 1999 and the 1999 mean run time  of 1.64 is smaller than the 2012's mean run time of 1.76. 
+**Density Plots**
+
+```{r, fig.cap = "Figure 2: Normalized run time density plots for men. The 1999 density plot is shown in purple and the 2012 density plot is shown in green."}
+plot(density(cbMen[cbMen$year == 1999, ]$normalizedRunTime, na.rm = TRUE),
+     xlab = "Normalized Run Time",
+     col = "purple", 
+     lwd = 3,
+     ylim = c(0, 1.6),
+     main = "Normalized Run Time Density Plots (Men)")
+lines(density(cbMen[cbMen$year == 2012, ]$normalizedRunTime, na.rm = TRUE), 
+      lwd = 3, 
+      lty = 2, 
+      col="green")
+legend("topleft", col = c("purple", "green"), lty= 1:2, lwd = 3,
+       legend = c("1999", "2012"), bty = "n")
+```
+<br>
+
+When comparing the density plots of the age-normalized times for the male runners in 1999 and 2012 as seen in Figure 2, it appears that participants in 1999 were overall able to finish the race in a shorter time period than in 2012 as the density plot for 2012 is more spread out and has a wider range.
+
+**Q-Q Plot**
+
+```{r, fig.cap = "Figure 3: Q-Q plot of normalized run time for male which plots the 1999 normalized run time against the 2012 normalized run time."}
+qqplot(cbMen[cbMen$year == 1999, ]$normalizedRunTime, cbMen[cbMen$year == 2012, ]$normalizedRunTime, pch = 19, cex = 0.5, 
+       xlab = "Run time in 1999 Race",
+       ylab = "Run time in 2012 Race", 
+       main = "Q-Q plot of Male Runner's Normalized Run Time")
+abline(a =0, b = 1, col="red", lwd = 2)
+```
+<br>
+
+The Q-Q plot in Figure 3 shows a high level of deviation from a straight line. The Q-Q plot here compares the quantiles of the 1999 and 2012 normalized run times to see whether they have the same distribution. Based on the plot, it does not appear that they do.
+
+### Analysis for Female Runners
+
+The summary statistics for female runners below show that the minimum age is 0 and there are 21 records with missing age value as well. The minimum run time is over 51 minutes, which sounds reasonable and is higher than the minimum run time for men (~45 mins).
+
+```{r}
+summary(cbWomen)
+```
+
+Similarly, we try to find the fastest runner's run time for each year of age from 20 to 80 as we did for the men dataset. We then plot the fastest run time vs age and find the appropriate hyperparameters for smoothing the times by using loess curve fitting as shown in Figure 4. For this data, the span value of 0.25 seems to be appropriate as well, although here is a high level of noise for the last few data points. That is because there are not many female runners who are above 75, there is only one female runner at each age 77, 78, and 80. 
+
+```{r, fig.cap = "Figure 4: The purple line shows the fastest run time for each year of age from 20 to 80 for women. The red line indicates the loess smoothed times using span of 0.25."}
+#to plot age vs run time, and pick the span value
+fastestRunTime_Women = with(cbWomen[cbWomen$age >= 20 & cbWomen$age <=80, ], tapply(runTime, list(age), FUN = function(x) min(x)))
+fastestRunTime_Women = data.frame(fastestRunTime_Women)
+age=c(20:78,80)
+fastestRunTime_Women = cbind(age,fastestRunTime_Women)
+names(fastestRunTime_Women) <- c("age","runTime")
+#Smooth using LOESS
+loessResults <- loess(runTime ~ age, data=fastestRunTime_Women, span=0.25, degree=2)
+loessSmoothed <- predict(loessResults)
+loessSmoothed
+   
+plot(runTime ~ age, data = fastestRunTime_Women,
+     xlab = "Age",
+     ylab = "Fastest Run Time",
+     col = "purple", 
+     lwd = 2,
+     type = "l",
+     ylim = c(0,150),
+     main = "Fastest Run Time by Age for Women")
+   
+lines(loessSmoothed, x=fastestRunTime_Women$age, col="red", type='l')
+   
+```
+
+<br>
+We then create a function to normalize each female runner's time by the calculated smoothed time of the same age. We add two new columns to the women dataset, *minRunTime* and *normalizedRunTime*, where values of *normalizedRunTime* are calculated using formula *(1)*.
+
+```{r}
+#Normalization (Women)
+normalizeRunTime <- function(df) {
+   #calculate the fastest time for each age 20-80
+   fastestRunTime = with(df[df$age >= 20 & df$age <=80, ], tapply(runTime, list(age), FUN = function(x) min(x)))
+   
+   #Smooth using LOESS
+   time <- unname(fastestRunTime)
+   age <- as.integer(names(fastestRunTime))
+   loessResults <- loess(time ~ age, span=0.25)
+   loessSmoothed <- predict(loessResults)
+   loessSmoothed
+   
+   #Normalize runtime
+   resultDf = data.frame(age=as.double(names(fastestRunTime)), minRunTime=loessSmoothed, row.names=NULL)
+   resultDf = merge(df, resultDf, by="age")
+   resultDf$normalizedRunTime <- resultDf$runTime / resultDf$minRunTime
+   
+   return(resultDf)
+}
+cbWomen <- normalizeRunTime(cbWomen)
+summary(cbWomen)
+```
+
+In order to compare the distribution of the age-normalized times for the female runners in 1999 and 2012, we generate summary statistics, density plots, and quantile–quantile plots. 
+
+**Summary Statistics**
+
+```{r}
+summary(cbWomen[cbWomen$year == 1999, ]$normalizedRunTime)
+summary(cbWomen[cbWomen$year == 2012, ]$normalizedRunTime)
+```
+
+The summary statistics for 1999 and 2012 also show that the normalized run times for 2012 have a slightly larger spread than 1999. We also noted that the 1999 mean run time is smaller than the 2012's. The mean run time for 1999 is 1.72 vs 1.79 for 2012. 
+
+**Density Plots**
+
+```{r, fig.cap = "Figure 5: Normalized run time density plots for women. The 1999 density plot is shown in purple and the 2012 density plot is shown in green."}
+plot(density(cbWomen[cbWomen$year == 1999, ]$normalizedRunTime, na.rm = TRUE),
+     xlab = "Normalized Run Time",
+     col = "purple", 
+     lwd = 3,
+     ylim = c(0, 2.0),
+     main = "Normalized Run Time Density Plots (Women)")
+lines(density(cbWomen[cbWomen$year == 2012, ]$normalizedRunTime, na.rm = TRUE), 
+      lwd = 3, 
+      lty = 2, 
+      col="green")
+legend("topleft", col = c("purple", "green"), lty= 1:2, lwd = 3,
+       legend = c("1999", "2012"), bty = "n")
+```
+
+<br>
+When comparing the distribution of the age-normalized times for the female runners in 1999 and 2012, it appears that overall, participants in 1999 were able to finish the race in shorter time period than the 2012 participants as we can see from the density plot in Figure 5. Similarly to male participants, more female participants finished the race in less time in 1999 than 2012, the density plot for 2012 is more spread out and it has a wider range. However, the density plots between 1999 and 2012 are more similar to one another than those for the male runners. 
+
+**Q-Q Plot**
+
+```{r, fig.cap = "Figure 6: Q-Q plot of normalized run time for male which plots the 1999 normalized run time against the 2012 normalized run time."}
+qqplot(cbWomen[cbWomen$year == 1999, ]$normalizedRunTime, cbWomen[cbWomen$year == 2012, ]$normalizedRunTime, pch = 19, cex = 0.5, 
+       xlab = "Run time in 1999 Race",
+       ylab = "Run time in 2012 Race", 
+       main = "Q-Q plot of Female Runner's Normalized Run Time")
+abline(a =0, b = 1, col="red", lwd = 2)
+```
+
+<br>
+The Q-Q plot in Figure 6 also shows less deviation from a straight line than the one for the male runners. Based on the plot, we can say that the two sets of quantiles for 1999 and 2012 women data have a similar distribution.
+
+**Density Plots: Women vs Men**
+
+```{r, fig.cap = "Figure 7: Normalized run time density plots for women and men. The 1999 density plot for women is shown in solid red and the 2012 density plot in dotted red. Blue color indicates the density plots for men respectively."}
+plot(density(cbWomen[cbWomen$year == 1999, ]$normalizedRunTime, na.rm = TRUE),
+     xlab = "Normalized Run Time",
+     col = "red", 
+     lwd = 3,
+     ylim = c(0, 2.0),
+     main = "Normalized Run Time Density Plots: Women vs Men")
+lines(density(cbWomen[cbWomen$year == 2012, ]$normalizedRunTime, na.rm = TRUE), 
+      lwd = 3, 
+      lty = 2, 
+      col="red")
+lines(density(cbMen[cbMen$year == 1999, ]$normalizedRunTime, na.rm = TRUE), 
+      lwd = 3, 
+      lty = 1, 
+      col="blue")
+lines(density(cbMen[cbMen$year == 2012, ]$normalizedRunTime, na.rm = TRUE), 
+      lwd = 3, 
+      lty = 2, 
+      col="blue")
+legend("topleft", col = c("red", "red", "blue", "blue"), lty= c(1:2, 1:2), lwd = 3,
+       legend = c("Women-1999", "Women-2012", "Men-1999", "Men-2012"), bty = "n")
+```
+
+<br>
+In Figure 7, we can see that the male runners in general finished the race faster than the female runners. The spread is also larger for men than women. The 2012 male density plot seems to have the largest spread, and more female runners finished the race around the mean run time in both 1999 and 2012 compared to its counterparts. 
+
+## Conclusion
+Overall, we found that the female run times distribution for 1999 and 2012 are more similar the males run times distribution for the same years. However, we did find several similarities between male and female run times in 1999 and in 2012.
+
+We found that in 1999 for both male and female runners that the overall spread was smaller, more participants finished the race in less time, and the mean and median run times were smaller than in 2012. Further work could include comparing the age density for between 1999 and 2012 for men and women to see if the faster run times in 1999 could be due to younger participants.
+
+An interesting point found is that the mean age for the female runners is 33.9 versus the mean male runners age of 38.9, and the median females runners age is 32 versus the median male runners age of 37. In fact, the mean males runners age is almost equivalent to the third quantile female runners age of 39. Additionally, we previously noted that there were very few female runners in any year above the age of 75. 
+
+The tighter age range for the female runners overall could contribute to why 1999 and 2012 have similar distributions. Further work could include re-running this analysis with a smaller age range to see if the same conclusion is reached. This would additionally fix the issues previously found in Figure 4.
+
+<br>
+
+## Sources
+[1] D. Lang and D. Nolan, Data Science in R: A Case Studies Approach to Computation Reasoning and Problem Solving. New York, New York: CRC Press.
+
+[2] Deborah Nolan and Duncan Temple Lang, “Case Studies in Data Science with R”. University of California, Berkeley and University of California, Davis. 2015. http://www.rdatasciencecases.org

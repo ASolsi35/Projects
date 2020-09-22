@@ -1,0 +1,416 @@
+---
+title: "Case Study 6: Using Statistics to Identify SPAM"
+author: "Kelly Carter, Swee K Chew, Volodymyr Orlov, Anjli Solsi"
+date: "02/11/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE}
+library(rpart)
+library(rpart.plot)
+library(RColorBrewer)
+library(caret)
+library(ROCR)
+
+set.seed(123) 
+```
+
+## Introduction
+As the overall use of the internet and its functions has become more commonplace, the intent for malicious deceit against the less-tech savvy has increased as well. One of the most common forms of this is the creation of spam email messaging. Spam messaging is something that has been encountered by any email user. Spam emails are often disguised as commercial in nature with the intent to trick email users into clicking a link disguised as a credible source or providing information to a noncredible entity veiled as a credible one.
+
+Every email service provider has created their own anti-spam techniques to filter and quarantine spam based on the content of the email. Spam detection itself is a simple classification problem; either an email is spam or it isn’t. But as important as it is for an anti-spam program to correctly identify an email as spam, it is equally as important for a legitimate email message not to be incorrectly identified as spam. In this case study, over 9000 emails will be evaluated that have been classified as spam or not spam by Apache’s SpamAssassin [1].
+
+
+## Background
+The data provided from the Nolan and Lang textbook presented 9353 messages divided into the following five cateogries: easy ham (5052), easy ham 2 (1401), hard ham (501), spam (1001) and spam 2 (1398). Using the classified emails provided, the purpose of this case study is to work to build a spam filter. First, the email messages provided must be processed into a form that can be used for analysis. The data set is cleaned by dissecting the emails into separate parts of the header, body content, and attachments using functions that are provided in the Nolan and Lang text. Once the data set is processed, all unique words used to build a dictionary with stop words removed. Stop words are commonplace words such as “the”, “a”, “is”, etc. that will not lend to analyzing the difference between spam and non-spam messages as they are likely to occur is both types of messaging.
+
+The next step is to work to determine if an email is spam or not spam based the words in the email versus the dictionary of words previously built from spam and non-spam messages. The Naïve-Bayes method is used to determine the approximate likelihood that an email is spam. Next, a decision tree model will be built using rpart to understand different parameters that affect the overall outcome. We will continue to finetune these parameters and analyze the change in the tree outcome until an optimal decision tree model is reached.
+
+For this case study, we are addressing the question 19 from the exercise which worded as follows: Consider the other parameters that can be used to control the recursive partitioning process. Read the documentation for them in the rpart.control() documentation. Also, carry out an Internet search for more information on how to tweak the rpart() tuning parameters. Experiment with values for these parameters. Do the trees that result make sense with your understanding of how the parameters are used? Can you improve the prediction using them?
+
+## Method
+The decision tree model was trained with the spam and ham data that resulted from the data cleaning process. 
+
+We will compare our created decision trees by examining the following metrics: accuracy, precision, and recall. The equations for each are as follows:
+
+Accuracy = $\frac{(Number\: of\: Correctly\: Classified\: Emails)}{(Total\: Emails\: Classified)}$
+
+Accuracy respresents how many classifications were correct versus the total number of emails classified. It is just the ratio of correctly predicted observations.  
+
+Precision = $\frac{(Spam\: Emails\: Correctly\: Classified\: as\: Spam)}{(Spam\: Emails\: Correctly\: Classified\: as\: Spam\: + \:Non-Spam\: Emails\: Classified\: as\: Spam)}$
+
+Precision represents how many emails were correctly classified as spam versus the total number of all emails classified as spam. The denominator is the total of all positives, which penalizes a model that over-predicts positive results.  
+
+Recall = $\frac{(Spam\: Emails\: Correctly\: Classified\: as\: Spam)}{(Spam\: Emails\: Correctly\: Classfied\: as\: Spam\: + \:Spam\: Emails\: Incorrectly\: Classified\: as\: Non-Spam)}$
+
+Recall represents how many emails were correctly classified as spam versus the true number of spam emails. The denominator is the total count of positive instances in the dataset, so it provides a ratio of only the correctly predicted positive outcomes. 
+
+The ultimate goal is to find a decision tree that has accuracy, precision, and recall values close to 1 [4].
+
+
+## Analysis
+
+```{r, echo=TRUE}
+
+#load the r datasets
+load("data.rda")
+head(emailDFrp)
+
+```
+
+From the summary table, we notice that there are more records of non-spam emails than spam emails in the dataset. The ratio is about 3:1.
+```{r, echo=TRUE}
+
+summary(emailDFrp)
+
+```
+
+First, we take a look at the tree we get using the default set of parameters in the **rpart** package for the recursive partitioning process. 
+
+These are the default parameter values that are used to build the base tree. 
+
+    `rpart.control(minsplit = 20, minbucket = 7, cp = 0.01,
+                   maxcompete = 4, maxsurrogate = 5, usesurrogate = 2, xval = 10,
+                   surrogatestyle = 0, maxdepth = 30)
+    `
+    
+```{r, echo=FALSE}
+set.seed(418910)
+
+numSpam <- sum(as.logical(emailDFrp$isSpam))
+numHam <- sum(1 - as.logical(emailDFrp$isSpam))
+
+rpartBaseFit = rpart(isSpam ~ ., data = emailDFrp, method = "class")
+rpart.plot(rpartBaseFit, extra = 1, main="Base Model: Classification Tree with Default Parameters.")
+
+```
+
+**Figure 1: Classification Tree based on default parameters in the *rpart* package.**
+<br>
+<br>
+
+The resulting tree shown in Figure 1 using the default parameters has a tree depth of 8 and it is a fairly complex model. 
+
+In the next sections, we tune selective parameters and compare the resulting tree to the base tree. To quantitatively compare the results of our tuning, we implement the following k-fold cross validation function. 
+
+```{r, echo=TRUE}
+runKFoldCV <- function(parameters, data, k){
+  #Randomly shuffle the data
+  data<-data[sample(nrow(data)),]
+  
+  #Create k equally size folds
+  folds <- cut(seq(1,nrow(data)),breaks=k,labels=FALSE)
+  
+  accuracy <- c()
+  precision <- c()
+  recall <- c()
+  
+  #Perform k-fold cross validation
+  for(i in 1:k){
+      #Segement your data by fold using the which() function 
+      testIndexes <- which(folds==i,arr.ind=TRUE)
+      testData <- data[testIndexes, ]
+      trainData <- data[-testIndexes, ]
+      #Fit the model
+      rpartFit = rpart(isSpam ~ ., data = trainData, method = "class", control = parameters)
+      #Get predictions
+      yhat <- predict(rpartFit, newdata = testData[ , names(testData) != "isSpam"], type = "class")
+      xtab = table(yhat, testData$isSpam)
+      #Calculate accuracy, precision and recall
+      accuracy = c(accuracy, sum(yhat == testData$isSpam)/length(testData$isSpam))
+      precision = c(precision, xtab[1,1]/sum(xtab[,1]))
+      recall = c(recall, xtab[1,1]/sum(xtab[1,]))
+  }
+  
+  list("accuracy" = accuracy, "precision" = precision, "recall" = recall)
+}
+```
+
+### Complexity Parameter (cp)
+
+In order to test the effect of this complexity parameter (cp), we will try to fit a tree with this parameter set to a very small and a very large number. This parameter serves the purpose of saving computing time by removing unnecessary splits. If a node splits, and the Gini index does not improve the cp, the split will be deemed unnecessary and removed. First, we set this parameter to a very small value.
+
+```{r, echo=TRUE}
+cp1 = rpart.control(cp = 1e-10)
+cp1Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", control = cp1)
+rpart.plot(cp1Fit, extra = 1, main="Classification Tree with cp = 1e-10.")
+```
+
+**Figure 2: Classification Tree using a very small cp value (cp = $1^{-10}$).**
+<br>
+<br>
+
+```{r, echo=TRUE}
+cp1Results = runKFoldCV(cp1, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(cp1Results$accuracy)```, recall: ```r mean(cp1Results$recall)```, precision: ```r mean(cp1Results$precision)```
+
+<br>
+
+Next, we set the cp parameter to a very large value.
+
+```{r, echo=TRUE}
+cp2 = rpart.control(cp = 1e+10)
+cp2Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", control = cp2)
+rpart.plot(cp2Fit, extra = 1, main="Classification tree with cp = 1e+10.")
+```
+
+**Figure 3: Classification Tree using a very large cp value (cp = $1^{10}$).**
+<br>
+<br>
+
+```{r, echo=TRUE}
+cp2Results = runKFoldCV(cp2, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(cp2Results$accuracy)```, recall: ```r mean(cp2Results$recall)```, precision: ```r mean(cp2Results$precision)```
+
+<br>
+**Table 1: Summary Table of Accuracy, Recall, and Precision Based on Cp values**
+
+Cp       |Accuracy |Recall   |Precision 
+---------|---------|---------|----------
+$1^{-10}$|0.9406295|0.9595694|0.9605483
+$1^{10}$ |0.7435809|0.7435809|1
+
+Based on the resulting trees (Figure 2 and Figure 3), the higher accuracy and recall come from a smaller complexity value as shown in Table 1. It appears that small values of this parameter allow for deeper trees that might overfit the data, while large values do force tree pruning. So one may choose a value that is not too small or too large when fitting a model. 
+
+### Minimum Number of Observations that Must Exist in a Node/Leaf 
+
+Here we will fit a few trees using a range of values for the **minsplit** and **minbucket** parameters. The **minsplit** parameter is used to set the minimum number of observations that must exist in a node in order for a split to be attempted. This value helps to prevent overfitting by ensuring there is a set number of observations in each node.
+The **minbucket** parameter set the minimum number of observations in any terminal leaf node [3]. This restricts a split from occurring if the node has fewer observations that the set value. 
+
+```{r, echo=TRUE}
+numObs1 = rpart.control(minsplit = 1, minbucket = 1)
+numObs1Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", control = numObs1)
+rpart.plot(numObs1Fit, extra = 1, main="Classification Tree with minsplit & minbucket = 1")
+```
+
+**Figure 4: Classification Tree using minsplit = 1 and minbucket = 1.**
+<br>
+<br>
+
+The resulting tree (Figure 4) has a tree depth of 8 and it is identical to the tree using the default parameters. 
+
+```{r, echo=TRUE}
+numObs1Results = runKFoldCV(numObs1, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(numObs1Results$accuracy)```, recall: ```r mean(numObs1Results$recall)```, precision: ```r mean(numObs1Results$precision)```
+
+Next, we try setting the parameters to 100. 
+```{r, echo=TRUE}
+numObs100 = rpart.control(minsplit = 100, minbucket = 100)
+numObs100Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", control = numObs100)
+rpart.plot(numObs100Fit, extra = 1, main="Classification Tree with minsplit & minbucket = 100")
+```
+
+**Figure 5: Classification Tree using minsplit = 100 and minbucket = 100.**
+<br>
+<br>
+
+The resulting tree (Figure 5) has a tree depth of 7 and thus has less leaf nodes than the previous one.
+
+```{r, echo=TRUE}
+numObs100Results = runKFoldCV(numObs100, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(numObs100Results$accuracy)```, recall: ```r mean(numObs100Results$recall)```, precision: ```r mean(numObs100Results$precision)```
+
+Lastly, we try setting the parameters to 1000. 
+```{r, echo=TRUE}
+numObs1000 = rpart.control(minsplit = 1000, minbucket = 1000)
+numObs1000Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", control = numObs1000)
+rpart.plot(numObs1000Fit, extra = 1, main="Classification Tree with minsplit & minbucket = 1000")
+```
+
+**Figure 6: Classification Tree using minsplit = 1000 and minbucket = 1000.**
+<br>
+<br>
+
+The resulting tree (Figure 6) only has a tree depth of 4 with 5 leaf nodes.
+
+```{r, echo=TRUE}
+numObs1000Results = runKFoldCV(numObs1000, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(numObs1000Results$accuracy)```, recall: ```r mean(numObs1000Results$recall)```, precision: ```r mean(numObs1000Results$precision)```
+
+<br>
+**Table 2: Summary Table of Accuracy, Recall, and Precision Based on Minsplit and Minbucket values**
+
+Minsplit|Minbucket|Accuracy |Recall   |Precision 
+--------|---------|---------|---------|---------
+1       |1        |0.9144204|0.9375582|0.9482057
+100     |100      |0.8939881|0.9313957|0.9256301
+1000    |1000     |0.8268059|0.8706251|0.9055787
+
+Based on our results in Table 2, smaller minsplit and minbucket values have a larger accuracy, recall, and precision. The resulting trees demonstrate that large values of both **minsplit** and **minbucket** parameters promote more shallow trees with more observations per leaf.
+
+### Other Parameters
+We also try to tweak the remaining parameters that are in the rpart.control() - **maxcompete**, **maxsurrogate**, **usesurrogate**, **surrogatestyle,**, **xval** and **maxdepth** by setting values other than the defaults.
+
+Maxcompete determines the number of competitor splits retained in the output.
+
+Maxsurrogate determines the number of surrogate splits retained in the output. A value of 0 reduces computational times, as about half of it is originally used searching for surrogate splits. 
+
+Usesurrogate determines how to use surrogates in the splitting process. A value of 0 means to display only. A value of 1 means to use the surrogates in order to split subject missing the primary variable. A value of 2 indicates to send the observation in the mahortiy direction if all surrogates are missing.
+
+Surrogatestyle controls the selection of a best surrogate. A value of 0 uses the total number of correct classifications for a potential surrogate variable, while a value of 1 uses the percent of correct classifications calculated over the non-missing values of the surrogate.
+
+Xval is the numer of cross-validations to be carried out on the data. For large datasets, the value of this variable can be around 3 and range from anywhere between 5 and 10 generally. Since this dictates the number of time the data is partitioned, trained, and tested on the last partition, increasing this value increases computation time. 
+
+Maxdepth is used to set the maximum depth of any node of the final tree, with the root node considered depth 0. 
+
+```{r, echo=TRUE}
+set1 = rpart.control(maxcompete = 2, maxsurrogate = 2, usesurrogate = 1, surrogatestyle = 1)
+set1Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", control = set1)
+rpart.plot(set1Fit, extra = 1, main="Classification Tree with Other Parameters")
+```
+
+**Figure 7: Classification Tree using maxcompete = 2, maxsurrogate = 2, usesurrogate = 1, and surrogatestyle = 1.**
+<br>
+<br>
+
+```{r, echo=TRUE}
+set1Results = runKFoldCV(set1, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(set1Results$accuracy)```, recall: ```r mean(set1Results$recall)```, precision: ```r mean(set1Results$precision)```
+
+The resulting tree in Figure 7 has a tree depth of 8 and it is almost the same as the classification tree produced from the default parameters, except that less observations are in the second leaf node from the left. We see that altering the **maxcompete**, **maxsurrogate**, **usesurrogate**, and **surrogatestyle** values in this case does not affect the results much.
+
+```{r, echo=TRUE}
+set2 = rpart.control(xval = 100, maxdepth = 10)
+set2Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", control = set2)
+rpart.plot(set2Fit, extra = 1, main="Classification Tree with xval and maxdepth")
+```
+
+**Figure 8: Classification Tree using xval = 100 and maxdepth = 10.**
+<br>
+<br>
+
+```{r, echo=TRUE}
+set2Results = runKFoldCV(set2, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(set2Results$accuracy)```, recall: ```r mean(set2Results$recall)```, precision: ```r mean(set2Results$precision)```
+
+
+The resulting tree shown in Figure 8 is the same as the classification tree produced from the default parameters with the tree depth of 8. We see that altering the **xval** and **maxdepth** values in this case does not affect the results. The depth of the tree, however, could be changed if we set the **maxdepth** parameter to any number less than 8. 
+
+<br>
+
+#### Setting Prior Probability
+The dataset utilized throughout this analysis is unbalanced. There are more false instances for the "isSpam" variable than true instances. In this section, we utilize the prior probability to account for the difference in instances. 
+
+```{r, echo=TRUE}
+set3 = rpart.control(xval = 10, maxdepth = 30)
+set3Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", parms = list(prior = c(0.744, 1-0.744)))
+rpart.plot(set3Fit, extra = 1, main="Classification Tree with Prior Probability")
+```
+
+**Figure 9: Classification Tree by setting prior probability of 0.744 for non-spam and 0.256 for spam emails. The values are calculated by dividing the number of spam/non-spam emails by the total number of observations.**
+<br>
+<br>
+
+```{r, echo=TRUE}
+set3Results = runKFoldCV(set3, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(set3Results$accuracy)```, recall: ```r mean(set3Results$recall)```, precision: ```r mean(set3Results$precision)```
+
+The resulting tree by setting the prior probability (Figure 9) is the same as the classification tree produced from the default parameters. However, the accuracy, precision, and recall are a tad bit lower when utilizing the prior probability parameter. 
+
+<br>
+
+#### Using Information Gain Instead of Gini Index
+The splits in the previous decision trees were based on the gini index metric. This metric is calculated by subtracting the sum of the squared probabilities of each class from one, and tends to favor larger partitions. In this tree, we utilize information gain, which multiplies the probability of a class times the log of that class probability. This metric tends to favor smaller paritions with many distinct values. 
+
+```{r, echo=TRUE}
+set4 = rpart.control(xval = 10, maxdepth = 30)
+set4Fit = rpart(isSpam ~ ., data = emailDFrp, method = "class", parms = list(split = 'information'))
+rpart.plot(set4Fit, extra = 1, main="Classification Tree with Information Gain")
+```
+
+**Figure 10: Classification Tree using Information Gain instead of Gini Index.**
+<br>
+<br>
+
+```{r, echo=TRUE}
+set4Results = runKFoldCV(set4, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(set4Results$accuracy)```, recall: ```r mean(set4Results$recall)```, precision: ```r mean(set4Results$precision)```
+
+The resulting tree in Figure 10 has a tree depth of 12, which is deeper than quite a few of the other resulting trees from changing other parameters. It does support the assertion of favoring larger partitions. 
+
+**Table 3: Summary Table of Accuracy, Recall, and Precision Based on Other Parameters**
+
+Method                                                |Accuracy |Recall   |Precision 
+------------------------------------------------------|---------|---------|---------
+maxcompete, maxsurrogate, usesurrogate, surrogatestyle|0.915168 |0.9362522|0.9507661
+xval = 100, maxdepth = 10                             |0.9136712|0.9370755|0.9475209
+prior probability                                     |0.9131353|0.9363693|0.947651
+information gain                                      |0.9102476|0.9369795|0.9429608 
+
+From the different methods tried above (Table 3), the resulting trees have a similar accuracy, precision, and recall, which are all quite high. 
+
+<br>
+
+#### K-Fold CV Using Caret
+
+We found on the Web that one interesting way to tune the parameters is to use the **Caret** package. The caret package (Classification and Regression Training) is a set of functions that attempt to streamline the process for creating predictive models. 
+
+```{r, echo=TRUE}
+set.seed(123)
+train.control <- trainControl(method = "cv", number = 5)
+
+grid <- expand.grid(.fL=c(0), .usekernel=c(FALSE))
+
+# Train the model
+model <- train(isSpam ~ ., data = emailDFrp, method = "rpart",
+               trControl = train.control, na.action = na.pass)
+rpart.plot(model$finalModel, extra = 1, main="Best Tree Found by the Caret Package")
+```
+
+**Figure 11: Classification Tree using the *Caret* package.**
+<br>
+<br>
+
+```{r, echo=TRUE}
+caretResults = runKFoldCV(model$parms, emailDFrp, 5)
+```
+
+Accuracy: ```r mean(caretResults$accuracy)```, recall: ```r mean(caretResults$recall)```, precision: ```r mean(caretResults$precision)```
+
+The resulting tree using the **Caret** package (Figure 11) gave us better precision and recall compared to most of the classification trees we have obtained. This tree is shallow and thus should be preferred due to Occam's Razor principle.
+
+The tree using a very small cp has the highest precision, recall, and accuracy among all the trees, however, it seems to be a overfitted tree and may not be practical to use for differentiating the spam emails. 
+
+
+## Conclusion 
+According to Spamlaws.com, 45% of all emails transmitted across the internet are spam. This is equivalent to 14.5 billion emails a day [5]. While it is typically easy to detect an email as spam with the human eye, using a systematic program or spam filter has proven to be more difficult. This challenge has become more complex in recent years as Phishing techniques continue to become more sophisticated. In this case study using text analysis, Naïve-Bayes, and decision trees methods, we found a decision tree that accurately defined spam 94% of the time; however, the model with the highest accuracy might not be the ideal one. 
+
+As previously noted, the decision tree found to have the best accuracy, precision and recall was found by manually fine-tuning parameters. However, this tree had a large depth. It could be argued that the tree found using K-Fold Cross Validation with the Caret package is preferable as it is shallower and thus would be less computationally intensive to implement. We ultimately want to find a balance of finding a model with high accuracy, precision, and recall while ensuring we are not overfitting.
+
+Based on the results found in this analysis, we believe the decision tree created using the K-Fold Cross Validation with five folds is the best model we found. We would argue this tree would be the best to implement as its simplicity achieves similar results to those we found in more complex trees created manually. Further research could include using Neural Networks, as they are primarily used for classification problems and could be applied to spam filtering, and seeing how the results compare.
+
+
+## Sources
+[1] D. Lang and D. Nolan, Data Science in R: A Case Studies Approach to Computation Reasoning and Problem Solving. New York, New York: CRC Press.
+
+[2] Deborah Nolan and Duncan Temple Lang, “Case Studies in Data Science with R”. University of California, Berkeley and University of California, Davis. 2015. http://www.rdatasciencecases.org
+
+[3] https://www.rdocumentation.org/packages/rpart/versions/4.1-15/topics/rpart.control
+
+[4] https://towardsdatascience.com/accuracy-precision-recall-or-f1-331fb37c5cb9
+
+[5] https://www.spamlaws.com/spam-stats.html
+
+## Code
